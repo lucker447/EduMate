@@ -1,2 +1,16 @@
+# IDE
 .vscode/
 .idea/
+
+# 密钥
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 根目录的试卷样图与识别产物：含真实试卷内容且体积大，不入库
+/img.png
+/img.md
+/test*.jpg
+/test*.png

@@ -12,7 +12,7 @@ def recognize_exam(image_path: str, model: str | None = None) -> str:
 
     Args:
         image_path: 本地图片路径。
-        model: 覆盖默认模型（默认取环境变量 DASHSCOPE_MODEL，否则 qwen-vl-ocr）。
+        model: 覆盖默认模型（默认取环境变量 DASHSCOPE_MODEL，否则 qwen3-vl-plus）。
     """
     raw = chat_with_image(image_path, EXAM_OCR_PROMPT, model=model)
     return normalize_markdown(raw)

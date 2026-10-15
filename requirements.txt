@@ -1,0 +1,16 @@
+# EduMate 运行依赖（conda 环境 edu，Python 3.10）
+# 安装：pip install -r requirements.txt
+
+# 模型调用（OpenAI 兼容端点，走第三方代理）
+openai>=1.0
+python-dotenv>=1.0
+
+# 数据结构
+pydantic>=2.0
+
+# 图片处理（读图转 base64、按网格切块）
+pillow>=10.0
+
+# 多智能体编排。定在 1.x：Send 的导入路径（langgraph.types）、子图自己的
+# recursion_limit、max_concurrency 这几条都按 1.x 实测过，0.x 的路径不一样。
+langgraph>=1.0

@@ -10,7 +10,21 @@ __pycache__/
 *.py[cod]
 
 # 根目录的试卷样图与识别产物：含真实试卷内容且体积大，不入库
+# 注意 img_3.png 例外：它是架构图，是文档的一部分，要入库。
 /img.png
+/img_1.png
+/img_2.png
 /img.md
+/img_*.md
 /test*.jpg
 /test*.png
+
+# CLI 用 -o output/ 时的默认输出目录
+/output/
+
+# 分页试卷图：一个子目录一份试卷，同样含真实试卷内容，不入库
+/data/
+
+# 切块缓存（tiler 的产物，源图一变就失效，没有入库价值）
+.tiles/
+**/.tiles/

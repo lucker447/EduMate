@@ -110,6 +110,20 @@ async def arun_paper(
     }
     graph = build_graph()
 
+    # B 方案：官方 CallbackHandler 自动给每个 LangGraph 节点建 span，入参是进入节点
+    # 时的 QuestionState、出参是节点返回的增量（连同步的 finalize 也有 —— 手工埋点做不到）。
+    # 回调模式下 tracing.span() 会退化成空操作，避免同一节点出现两条重复的树。
+    # metadata 里的 langfuse_* 键会被 handler 解析成 trace 级属性：必须显式给，
+    # 否则 handler 在根 run 上用 None 覆盖一次，子 span 的 session / tags 就丢了。
+    handler = tracing.callback_handler()
+    if handler is not None:
+        config["callbacks"] = [handler]
+        config["metadata"] = {
+            "langfuse_session_id": name,
+            "langfuse_trace_name": f"整卷 · {name}",
+            "langfuse_tags": ["edumate", "solve"],
+        }
+
     started = time.monotonic()
     # 整卷一棵 trace 树：根 span 下面每道题一棵子树，题内按轮次展开。
     # 没配 Langfuse 时这里退化成空操作，不改任何行为。

@@ -1,8 +1,19 @@
 """Langfuse 观测层。
 
-对外只有四个入口：``trace``（整卷）、``span``（题目 / 每一轮）、``flush``、
-``enabled``。没有配置、没装 SDK、或者 ``LANGFUSE_TRACING_ENABLED=false`` 时，全部
-退化成空操作 —— 调用点**不需要**判断开关，也不需要 import langfuse。
+两套埋点方式，靠 ``EDUMATE_TRACE_MODE`` 切换（本分支默认 ``callback``）：
+
+- ``manual``（A 方案）：节点里手工 ``with span("第 N 轮 · 解答")``，能标出轮次；
+  但同步节点（``finalize``）跑在线程池里，拿不到异步上下文，埋不了点。
+- ``callback``（B 方案）：把 ``langfuse.langchain.CallbackHandler`` 挂到 LangGraph 的
+  ``config["callbacks"]`` 上，节点 span 由官方 handler 自动生成，入参是进入节点时的
+  ``QuestionState``、出参是节点返回的增量，连 ``finalize`` 也有。
+  代价是 span 名只有节点名（``solve`` / ``verify``），看不出第几轮 —— 轮次要进去看
+  ``rounds`` 字段。
+
+对外入口：``trace``（整卷根 span）、``span``（手工埋点，回调模式下退化为空操作）、
+``callback_handler``（B 方案的 handler）、``flush``、``enabled``、``mode``。
+没有配置、没装 SDK、或者 ``LANGFUSE_TRACING_ENABLED=false`` 时，全部退化成空操作
+—— 调用点**不需要**判断开关，也不需要 import langfuse。
 
 两条原则：
 
@@ -23,12 +34,27 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-__all__ = ["enabled", "flush", "snapshot", "span", "trace"]
+__all__ = [
+    "callback_handler",
+    "enabled",
+    "flush",
+    "mode",
+    "snapshot",
+    "span",
+    "trace",
+]
 
 _log = logging.getLogger(__name__)
 
 # 探测结果缓存：None 表示还没探测过。
 _available: bool | None = None
+
+# 回调 handler 是否已经成功建起来：None 表示还没试过。
+# 只有它明确为 True 才关掉手工 span —— handler 建不起来（没装 langchain、
+# import 失败）时必须退回手工埋点，否则整棵 trace 会空掉。
+_callback_ready: bool | None = None
+
+_MODE_ENV = "EDUMATE_TRACE_MODE"
 
 # data URL 前缀，例如 ``data:image/jpeg;base64,``。
 _DATA_URI_RE = re.compile(r"^data:([\w/+.-]+);base64,")
@@ -125,6 +151,49 @@ def enabled() -> bool:
     return _load()
 
 
+def mode() -> str:
+    """当前的埋点方式：``manual``（A）或 ``callback``（B）。
+
+    本分支默认 ``callback``；临时对比两套形状时设
+    ``EDUMATE_TRACE_MODE=manual`` 即可切回手工 span。
+    """
+    return os.getenv(_MODE_ENV, "callback").strip().lower()
+
+
+def _manual_disabled() -> bool:
+    """回调 handler 接管时，手工 span 让位，避免同一节点出现两条重复的树。"""
+    return mode() == "callback" and _callback_ready is True
+
+
+def callback_handler():
+    """建一个 Langfuse 的 LangChain/LangGraph 回调；不可用时返回 ``None``。
+
+    返回 ``None`` 时会把 ``_callback_ready`` 置成 ``False``，``span()`` 继续走手工埋点
+    —— 少一份自动状态，总比整棵树没有强。
+    """
+    global _callback_ready
+    if mode() != "callback" or not _load():
+        _callback_ready = False
+        return None
+
+    try:
+        from langfuse.langchain import CallbackHandler  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 —— 没装 langchain 元包时就是这里
+        _log.warning("langfuse.langchain 不可用，退回手工埋点", exc_info=True)
+        _callback_ready = False
+        return None
+
+    try:
+        handler = CallbackHandler()
+    except Exception:  # noqa: BLE001
+        _log.warning("Langfuse CallbackHandler 构造失败，退回手工埋点", exc_info=True)
+        _callback_ready = False
+        return None
+
+    _callback_ready = True
+    return handler
+
+
 def _open(kind: str, name: str, *, input=None, metadata=None, model=None):
     """建一个 context manager；建不出来返回 None。"""
     if not _load():
@@ -177,8 +246,17 @@ def _enter(cm) -> Iterator[Any]:
 
 
 @contextmanager
-def span(name: str, *, input=None, metadata=None):
-    """普通 span。没有观测时 yield 一个空 span。"""
+def span(name: str, *, input=None, metadata=None, _force: bool = False):
+    """普通 span。没有观测时 yield 一个空 span。
+
+    ``_force`` 只给 ``trace()`` 用：回调模式下根 span 仍然必须手工建，因为
+    ``langfuse.openai`` 的 generation 靠 OTel 当前 span 找父节点，而实测在
+    LangGraph 的异步节点里，handler 的 span 并不是模型调用时的当前 span；没有这层
+    根 span，每次模型调用都会变成一条独立的 orphan trace。
+    """
+    if not _force and _manual_disabled():
+        yield _NULL_SPAN
+        return
     with _enter(_open("span", name, input=input, metadata=metadata)) as observation:
         yield observation
 
@@ -213,7 +291,7 @@ def trace(
             attributes = None
 
     try:
-        with span(name, input=input, metadata=metadata) as root:
+        with span(name, input=input, metadata=metadata, _force=True) as root:
             yield root
     finally:
         if attributes is not None:

@@ -14,3 +14,8 @@ pillow>=10.0
 # 多智能体编排。定在 1.x：Send 的导入路径（langgraph.types）、子图自己的
 # recursion_limit、max_concurrency 这几条都按 1.x 实测过，0.x 的路径不一样。
 langgraph>=1.0
+
+# 观测：每次解答一条 trace，题目 / 每轮解答核验 / 模型调用分层展开。
+# 注意清华镜像没有这个包，装的时候要加 -i https://pypi.org/simple。
+# 没配 LANGFUSE_* 时观测层自动退化成空操作，不影响运行。
+langfuse>=4.18,<5

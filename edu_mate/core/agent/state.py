@@ -46,7 +46,7 @@ class PaperState(TypedDict, total=False):
     """整卷状态。"""
 
     name: str
-    questions: list
+    questions: list # 类型为 list(Question)，大小为题目数量
     page_refs: list
     warnings: list
     meta: dict

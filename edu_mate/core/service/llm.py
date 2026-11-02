@@ -17,11 +17,18 @@ from openai import (
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
-    AsyncOpenAI,
     InternalServerError,
-    OpenAI,
     RateLimitError,
 )
+
+# 有 Langfuse 就用它的 OpenAI drop-in：客户端接口完全一致，但每次
+# ``chat.completions.create`` 都会自动记一条 generation（入参、出参、token、耗时），
+# 并挂在当前活动的 span 下 —— 也就是 agent 层「第 N 轮 · 解答」里面。
+# 它是全局 patch，识别链路的同步调用同样会被记录；没装 langfuse 时退回原生客户端。
+try:
+    from langfuse.openai import AsyncOpenAI, OpenAI
+except Exception:  # noqa: BLE001 —— 观测装不上，模型调用本身不能受影响
+    from openai import AsyncOpenAI, OpenAI
 
 __all__ = [
     "DEFAULT_BASE_URL",
@@ -81,6 +88,13 @@ def get_client() -> OpenAI:
     """
     global _client
     if _client is None:
+        # 先把带 mask 的 Langfuse 客户端注册好，再发第一次请求。顺序不能反：
+        # drop-in 在请求时按需创建 Langfuse 客户端，先创建的客户端会把 mask 定死，
+        # 后注册的那份配置就盖不上去了。
+        # 惰性导入：`service/__init__.py` 会导入本模块，顶层再导回 service 就成了循环。
+        from edu_mate.core.service import tracing
+
+        tracing.enabled()
         _client = OpenAI(api_key=_require_key(), base_url=DEFAULT_BASE_URL)
     return _client
 
@@ -89,6 +103,9 @@ def get_async_client() -> AsyncOpenAI:
     """惰性构造异步客户端。理由同 ``get_client``。"""
     global _async_client
     if _async_client is None:
+        from edu_mate.core.service import tracing
+
+        tracing.enabled()  # 同上：mask 必须在第一次请求前注册
         _async_client = AsyncOpenAI(api_key=_require_key(), base_url=DEFAULT_BASE_URL)
     return _async_client
 

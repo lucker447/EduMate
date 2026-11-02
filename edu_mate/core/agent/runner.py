@@ -13,9 +13,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from edu_mate.core.agent.graph import OUTER_RECURSION_LIMIT, build_graph
-from edu_mate.core.agent.nodes import Deps, make_call_llm
+from edu_mate.core.agent.graph import (
+    OUTER_RECURSION_LIMIT,
+    build_graph,
+    make_call_llm,
+)
 from edu_mate.core.schema import PageRef, PaperResult
+from edu_mate.core.service import tracing
 from edu_mate.core.service.llm import DEFAULT_MODEL
 from edu_mate.core.service.parse import parse_paper
 from edu_mate.core.service.paper import recognize_paper
@@ -60,7 +64,7 @@ def _coverage_warning(questions, page_refs) -> list:
 async def arun_paper(
     name: str,
     md: str,
-    page_paths=None,
+    page_paths=None,    # pathlib.WindowsPath 对象
     *,
     jobs: int = 4,
     max_rounds: int = 3,
@@ -72,10 +76,10 @@ async def arun_paper(
 ) -> PaperResult:
     """``run_paper`` 的异步核心。已经识别好的 ``md`` 文本进来，``PaperResult`` 出去。"""
     page_paths = list(page_paths or [])
-    page_refs = _page_refs(page_paths)
+    page_refs = _page_refs(page_paths)  # page_refs为 list[PageRef]，大小为图片数量
 
     warnings = []
-    questions = parse_paper(md, warnings=warnings)
+    questions = parse_paper(md, warnings=warnings)  # questions为 list[Question]，大小为题目数量
     if not questions:
         raise NoQuestionsError("从识别结果里解析不出任何题目")
     warnings.extend(_coverage_warning(questions, page_refs))
@@ -92,23 +96,48 @@ async def arun_paper(
         async with gate:
             return await base(images, prompt)
 
-    deps = Deps(
-        call_llm=gated, max_rounds=max_rounds, subject=subject,
-        tile_dir=tile_dir, on_event=on_event,
-    )
-    graph, _ = build_graph(deps)
+    # 运行时依赖全部走 configurable：节点在调用时取，装配时不需要任何对象。
+    config = {
+        "recursion_limit": OUTER_RECURSION_LIMIT,
+        "max_concurrency": jobs if jobs and jobs > 0 else None,
+        "configurable": {
+            "call_llm": gated,
+            "max_rounds": max_rounds,
+            "subject": subject,
+            "tile_dir": tile_dir,
+            "on_event": on_event,
+        },
+    }
+    graph = build_graph()
 
     started = time.monotonic()
-    state = await graph.ainvoke(
-        {"name": name, "questions": questions, "page_refs": page_refs},
-        config={
-            "recursion_limit": OUTER_RECURSION_LIMIT,
-            "max_concurrency": jobs if jobs and jobs > 0 else None,
+    # 整卷一棵 trace 树：根 span 下面每道题一棵子树，题内按轮次展开。
+    # 没配 Langfuse 时这里退化成空操作，不改任何行为。
+    with tracing.trace(
+        f"整卷 · {name}",
+        session_id=name,
+        tags=["edumate", "solve"],
+        metadata={
+            "model": model or DEFAULT_MODEL,
+            "max_rounds": max_rounds,
+            "jobs": jobs,
+            "questions": len(questions),
         },
-    )
-    elapsed = time.monotonic() - started
-
-    records = state.get("ordered") or []
+        input={"name": name, "questions": len(questions)},
+    ) as root:
+        state = await graph.ainvoke(
+            {"name": name, "questions": questions, "page_refs": page_refs},
+            config=config,
+        )
+        elapsed = time.monotonic() - started
+        records = state.get("ordered") or []
+        root.update(output={
+            "题数": len(records),
+            "通过": sum(1 for item in records if item.record.passed),
+            "exhausted": sum(1 for item in records if item.record.exhausted),
+            "出错": sum(1 for item in records if item.record.error),
+            "耗时秒": round(elapsed, 1),
+        })
     return PaperResult(
         name=name,
         page_refs=page_refs,
@@ -162,7 +191,7 @@ def run_paper(
     page_paths = [Path(p) for p in (pages or [])]
 
     if md_path is not None:
-        md = Path(md_path).read_text(encoding="utf-8")
+        md = Path(md_path).read_text(encoding="utf-8")  # md为md文件的内容 str
     elif page_paths:
         md = recognize_paper(
             [str(p) for p in page_paths], model=model, on_page=on_page
@@ -175,10 +204,14 @@ def run_paper(
         # 没给的话交给 tiler 的 default_tile_dir()（系统临时目录）—— 默认值只在那里
         # 定义一次，因为它才是**真正拼路径**的地方。以前这里另存一份，结果 cli 的
         # --dry-run 走的是 tiler 那份、落进了当前工作目录。
-        tile_dir = str(out_dir)
+        tile_dir = str(out_dir) # tile_dir 为 -o 的参数，str
 
-    return asyncio.run(arun_paper(
-        name, md, page_paths,
-        jobs=jobs, max_rounds=max_rounds, subject=subject, model=model,
-        call_llm=call_llm, on_event=on_event, tile_dir=tile_dir,
-    ))
+    try:
+        return asyncio.run(arun_paper(
+            name, md, page_paths,
+            jobs=jobs, max_rounds=max_rounds, subject=subject, model=model,
+            call_llm=call_llm, on_event=on_event, tile_dir=tile_dir,
+        ))
+    finally:
+        # 命令行进程活得很短：不 flush 会丢掉最后一批 span。
+        tracing.flush()
